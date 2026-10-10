@@ -79,6 +79,14 @@ async function seedMongo() {
 
 app.use(cors())
 app.use(express.json({ limit: '32kb' }))
+app.use(async (_req, _res, next) => {
+  try {
+    await connectDatabase()
+    next()
+  } catch (err) {
+    next(err)
+  }
+})
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'CanteenOne API', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }))
 app.get('/api/shops', async (_req, res, next) => {
   try { res.json({ shops: await Promise.all(shops.map(menuForShop)) }) } catch (err) { next(err) }
