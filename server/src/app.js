@@ -234,3 +234,5 @@ export function connectDatabase() {
 }
 
 export { app }
+
+export default app;
