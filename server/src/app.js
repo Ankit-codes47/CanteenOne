@@ -220,8 +220,15 @@ app.use((err, _req, res, _next) => {
 let databasePromise
 export function connectDatabase() {
   if (!databasePromise) {
-    const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/canteenone'
-    databasePromise = mongoose.connect(uri, { serverSelectionTimeoutMS: 7000 }).then(seedMongo).catch((err) => { databasePromise = undefined; throw err })
+    const configuredUri = process.env.MONGODB_URI
+    const uri = configuredUri || process.env.CANTEENONE_LOCAL_MONGODB_URI || 'mongodb://127.0.0.1:27017/canteenone'
+    const useLocalFallback = Boolean(configuredUri?.startsWith('mongodb+srv://') && process.env.NODE_ENV !== 'production' && !process.env.VERCEL)
+    databasePromise = mongoose.connect(uri, { serverSelectionTimeoutMS: 7000 }).catch(async (err) => {
+      if (!useLocalFallback) throw err
+      console.error(`MongoDB Atlas is unreachable in local development (${err.name}). Trying the local development database.`)
+      await mongoose.connect(process.env.CANTEENONE_LOCAL_MONGODB_URI || 'mongodb://127.0.0.1:27017/canteenone', { serverSelectionTimeoutMS: 5000 })
+      console.warn('Using local MongoDB for this run. Changes will not be saved to Atlas until Atlas allows this computer’s IP address.')
+    }).then(seedMongo).catch((err) => { databasePromise = undefined; throw err })
   }
   return databasePromise
 }
