@@ -121,9 +121,11 @@ app.post('/api/auth/logout', auth, async (req, res, next) => { try { await Sessi
 app.post('/api/payments/demo', auth, requireRole('student'), async (req, res, next) => {
   try {
     const amount = Number(req.body?.amount)
+    const method = String(req.body?.method || 'upi')
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Invalid payment amount.' })
-    const payment = await Payment.create({ _id: `PAY-${randomUUID().slice(0, 8).toUpperCase()}`, studentId: req.user._id, amount, status: 'paid', mode: 'demo' })
-    res.status(201).json({ payment: { id: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, paidAt: payment.createdAt } })
+    if (!['upi', 'card', 'netbanking'].includes(method)) return res.status(400).json({ error: 'Choose a supported payment method.' })
+    const payment = await Payment.create({ _id: `PAY-${randomUUID().slice(0, 8).toUpperCase()}`, studentId: req.user._id, amount, status: 'paid', mode: 'demo', method })
+    res.status(201).json({ payment: { id: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, method: payment.method, paidAt: payment.createdAt } })
   } catch (err) { next(err) }
 })
 app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => {
@@ -154,7 +156,7 @@ app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => 
       orderNo, token: `C1-${orderNo}`, shopId, shopName: shop.name, shopEmoji: shop.emoji, shopLogo: shop.logo,
       studentId: req.user._id, studentName: req.user.name, note: note.trim(), items: lineItems, total,
       savings: lineItems.reduce((sum, item) => sum + item.quantity, 0),
-      payment: { receipt: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, paidAt: payment.createdAt },
+      payment: { receipt: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, method: payment.method, paidAt: payment.createdAt },
       readyInMinutes: Number(readyInMinutes), createdAt: now, readyAt: new Date(now.getTime() + Number(readyInMinutes) * 60_000), status: 'new',
     })
     res.status(201).json({ order: orderJson(order) })

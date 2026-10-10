@@ -24,6 +24,7 @@ const paymentSchema = new mongoose.Schema({
   status: { type: String, enum: ['paid'], default: 'paid' },
   used: { type: Boolean, default: false },
   mode: { type: String, default: 'demo' },
+  method: { type: String, enum: ['upi', 'card', 'netbanking'], default: 'upi' },
 }, { timestamps: true })
 
 const orderSchema = new mongoose.Schema({
@@ -39,7 +40,7 @@ const orderSchema = new mongoose.Schema({
   items: [{ productId: String, name: String, offlinePrice: Number, unitPrice: Number, quantity: Number, lineTotal: Number }],
   total: { type: Number, required: true },
   savings: { type: Number, required: true },
-  payment: { receipt: String, amount: Number, status: String, mode: String, paidAt: Date },
+  payment: { receipt: String, amount: Number, status: String, mode: String, method: String, paidAt: Date },
   readyInMinutes: { type: Number, enum: [15, 30, 45], required: true },
   readyAt: { type: Date, required: true },
   status: { type: String, enum: ['new', 'accepted', 'preparing', 'ready', 'delivered'], default: 'new', index: true },
