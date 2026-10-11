@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+  <title>CanteenOne</title>
+  <rect width="40" height="40" rx="10" fill="#316c4b"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.4">
+    <path d="M10 8v7m5-7v7m-10 0h10m-5 0v17"/>
+    <path d="M27 8c-3 3-4 7-4 11h8c0-4-1-8-4-11Zm0 11v13"/>
+  </g>
+</svg>
