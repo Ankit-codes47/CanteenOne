@@ -3,7 +3,13 @@ import { ArrowLeft, ArrowRight, Building2, Check, ChevronDown, ClipboardList, Cl
 
 const money = (amount) => `₹${Number(amount).toFixed(0)}`
 const statusNames = { new: 'Received', accepted: 'Paid · queued', preparing: 'Preparing', ready: 'Ready for pickup', delivered: 'Delivered' }
-const initialScreen = () => 'home'
+const initialScreen = () => {
+  const path = window.location.pathname
+  if (path === '/shop') return localStorage.getItem('canteenone-token') ? 'shop' : 'auth'
+  if (path === '/orders') return localStorage.getItem('canteenone-token') ? 'orders' : 'auth'
+  if (path === '/login') return 'auth'
+  return 'home'
+}
 
 async function request(path, options = {}, token = localStorage.getItem('canteenone-token')) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
@@ -56,7 +62,7 @@ export default function App() {
     if (token) request('/api/auth/me', {}, token).then(({ user: current }) => {
       if (current.role !== 'student') { localStorage.removeItem('canteenone-token'); setToken(''); return }
       setUser(current)
-      setScreen('home')
+      setScreen(initialScreen())
     }).catch(() => { localStorage.removeItem('canteenone-token'); setToken('') })
     return () => { window.removeEventListener('popstate', handlePopState); window.clearInterval(shopTimer) }
   }, [])

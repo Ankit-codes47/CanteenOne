@@ -3,7 +3,13 @@
   "services": {
     "client": {
       "root": "client",
-      "framework": "vite"
+      "framework": "vite",
+      "rewrites": [
+        { "source": "/", "destination": "/index.html" },
+        { "source": "/shop", "destination": "/index.html" },
+        { "source": "/orders", "destination": "/index.html" },
+        { "source": "/login", "destination": "/index.html" }
+      ]
     },
     "server": {
       "root": "server",
