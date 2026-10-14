@@ -94,7 +94,6 @@ async function seedMongo() {
     const { salt, passwordHash } = passwordParts(seed.password)
     const account = { name: seed.name, email: seed.email, role: seed.role || 'vendor', salt, passwordHash }
     if (seed.vendorId) Object.assign(account, { vendorId: seed.vendorId, shopId: seed.shopId })
-    if (seed.adminId) account.adminId = seed.adminId
     const filter = seed.vendorId ? { vendorId: seed.vendorId } : { email: seed.email }
     const update = { $setOnInsert: account }
     if (seed.adminId) update.$set = { adminId: seed.adminId }
