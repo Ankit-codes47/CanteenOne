@@ -6,7 +6,7 @@ const accountSchema = new mongoose.Schema({
   vendorId: { type: String, unique: true, sparse: true, uppercase: true, trim: true },
   passwordHash: { type: String, required: true, select: false },
   salt: { type: String, required: true, select: false },
-  role: { type: String, enum: ['student', 'vendor'], required: true },
+  role: { type: String, enum: ['student', 'vendor', 'admin'], required: true },
   shopId: { type: String, default: null },
 }, { timestamps: true })
 
@@ -16,6 +16,26 @@ const stockSchema = new mongoose.Schema({
   inStock: { type: Boolean, default: true },
 }, { timestamps: true })
 stockSchema.index({ shopId: 1, productId: 1 }, { unique: true })
+
+
+const menuItemSchema = new mongoose.Schema({
+  shopId: { type: String, required: true },
+  productId: { type: String, required: true },
+  name: { type: String, required: true, trim: true },
+  description: { type: String, default: '', trim: true },
+  category: { type: String, required: true, trim: true },
+  price: { type: Number, required: true, min: 2 },
+  image: { type: String, required: true },
+  prepTime: { type: Number, default: 10 },
+  badge: { type: String, default: 'NEW' },
+  isDeleted: { type: Boolean, default: false },
+}, { timestamps: true })
+menuItemSchema.index({ shopId: 1, productId: 1 }, { unique: true })
+
+const shopStateSchema = new mongoose.Schema({
+  shopId: { type: String, required: true, unique: true },
+  isOpen: { type: Boolean, default: true },
+}, { timestamps: true })
 
 const paymentSchema = new mongoose.Schema({
   _id: { type: String },
@@ -46,6 +66,8 @@ const orderSchema = new mongoose.Schema({
   status: { type: String, enum: ['new', 'accepted', 'preparing', 'ready', 'delivered'], default: 'new', index: true },
   deliveredAt: { type: Date, default: null },
 }, { timestamps: true })
+orderSchema.index({ shopId: 1, createdAt: -1 })
+orderSchema.index({ studentId: 1, createdAt: -1 })
 
 const reviewSchema = new mongoose.Schema({
   shopId: { type: String, required: true, index: true },
@@ -64,6 +86,8 @@ const sessionSchema = new mongoose.Schema({
 
 export const Account = mongoose.model('Account', accountSchema)
 export const ProductStock = mongoose.model('ProductStock', stockSchema)
+export const MenuItem = mongoose.model('MenuItem', menuItemSchema)
+export const ShopState = mongoose.model('ShopState', shopStateSchema)
 export const Payment = mongoose.model('Payment', paymentSchema)
 export const Order = mongoose.model('Order', orderSchema)
 export const Review = mongoose.model('Review', reviewSchema)

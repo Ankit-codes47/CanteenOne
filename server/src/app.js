@@ -3,12 +3,24 @@ import cors from 'cors'
 import mongoose from 'mongoose'
 import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto'
 import { shops } from './data.js'
-import { Account, Order, Payment, ProductStock, Review, Session } from './models.js'
+import { Account, MenuItem, Order, Payment, ProductStock, Review, Session, ShopState } from './models.js'
 
 const app = express()
 
 const publicUser = (user) => ({ id: String(user._id), name: user.name, email: user.email, vendorId: user.vendorId || null, role: user.role, shopId: user.shopId || null })
 const findShop = (shopId) => shops.find((item) => item.id === shopId)
+async function findProductForShop(shopId, productId) {
+  const saved = await MenuItem.findOne({ shopId, productId }).lean()
+  if (saved?.isDeleted) return null
+  const original = findShop(shopId)?.products.find((item) => item.id === productId)
+  return original || (saved && !saved.isDeleted ? saved : null)
+}
+function indiaDayBounds(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
+  const part = (type) => parts.find((item) => item.type === type).value
+  const start = new Date(`${part('year')}-${part('month')}-${part('day')}T00:00:00+05:30`)
+  return { $gte: start, $lt: new Date(start.getTime() + 24 * 60 * 60 * 1000) }
+}
 
 function passwordParts(password) {
   const salt = randomBytes(16).toString('hex')
@@ -43,12 +55,22 @@ async function auth(req, res, next) {
 function requireRole(role) {
   return (req, res, next) => req.user.role === role ? next() : res.status(403).json({ error: 'This account cannot access that page.' })
 }
-async function menuForShop(shop) {
-  const stocks = await ProductStock.find({ shopId: shop.id }).lean()
+async function menuForShop(shop, sharedData = null) {
+  const [stocks, savedItems, state] = sharedData
+    ? [sharedData.stocks.filter((item) => item.shopId === shop.id), sharedData.savedItems.filter((item) => item.shopId === shop.id), sharedData.states.find((item) => item.shopId === shop.id)]
+    : await Promise.all([
+      ProductStock.find({ shopId: shop.id }).lean(),
+      MenuItem.find({ shopId: shop.id }).lean(),
+      ShopState.findOne({ shopId: shop.id }).lean(),
+    ])
   const stockById = new Map(stocks.map((item) => [item.productId, item.inStock]))
+  const hiddenIds = new Set(savedItems.filter((item) => item.isDeleted).map((item) => item.productId))
+  const addedItems = savedItems.filter((item) => !item.isDeleted).map(({ _id, __v, shopId, productId, ...item }) => ({ ...item, id: productId }))
+  const products = [...shop.products.filter((item) => !hiddenIds.has(item.id)), ...addedItems]
   return {
     ...shop,
-    products: shop.products.map((product) => ({
+    isOpen: state?.isOpen ?? true,
+    products: products.map((product) => ({
       ...product,
       offlinePrice: product.price,
       price: Math.max(1, product.price - 1),
@@ -56,6 +78,7 @@ async function menuForShop(shop) {
     })),
   }
 }
+
 async function seedMongo() {
   const vendorSeeds = [
     { shopId: 'urban-vada-pav', name: 'Urban Vada Pav Vendor', email: 'urban@canteenone.demo', vendorId: 'CTN-URBAN-01', password: 'urban1234' },
@@ -64,17 +87,21 @@ async function seedMongo() {
     { shopId: 'ke7', name: 'KE7 Vendor', email: 'ke7@canteenone.demo', vendorId: 'CTN-KE7-01', password: 'ke71234' },
     { shopId: 'mr-sandwich', name: 'Mr. Sandwich Vendor', email: 'sandwich@canteenone.demo', vendorId: 'CTN-SANDWICH-01', password: 'sandwich1234' },
   ]
-  for (const seed of vendorSeeds) {
-    const existing = await Account.findOne({ vendorId: seed.vendorId })
-    if (!existing) {
-      const hashed = passwordParts(seed.password)
-      await Account.create({ name: seed.name, email: seed.email, vendorId: seed.vendorId, role: 'vendor', shopId: seed.shopId, ...hashed })
-    }
-  }
-  for (const shop of shops) for (const product of shop.products) {
-    await ProductStock.updateOne({ shopId: shop.id, productId: product.id }, { $setOnInsert: { inStock: true } }, { upsert: true })
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+  const adminPassword = process.env.ADMIN_PASSWORD
+  if (adminEmail && adminPassword) vendorSeeds.push({ name: process.env.ADMIN_NAME || 'CanteenOne Admin', email: adminEmail, password: adminPassword, role: 'admin' })
+  const accountOps = vendorSeeds.map((seed) => {
+    const { salt, passwordHash } = passwordParts(seed.password)
+    const account = { name: seed.name, email: seed.email, role: seed.role || 'vendor', salt, passwordHash }
+    if (seed.vendorId) Object.assign(account, { vendorId: seed.vendorId, shopId: seed.shopId })
+    return { updateOne: { filter: seed.vendorId ? { vendorId: seed.vendorId } : { email: seed.email }, update: { $setOnInsert: account }, upsert: true } }
+  })
+  const stateOps = shops.map((shop) => ({ updateOne: { filter: { shopId: shop.id }, update: { $setOnInsert: { shopId: shop.id, isOpen: true } }, upsert: true } }))
+  const stockOps = shops.flatMap((shop) => shop.products.map((product) => {
     product.offlinePrice = product.price
-  }
+    return { updateOne: { filter: { shopId: shop.id, productId: product.id }, update: { $setOnInsert: { shopId: shop.id, productId: product.id, inStock: true } }, upsert: true } }
+  }))
+  await Promise.all([Account.bulkWrite(accountOps), ShopState.bulkWrite(stateOps), ProductStock.bulkWrite(stockOps)])
 }
 
 app.use(cors())
@@ -89,7 +116,11 @@ app.use(async (_req, _res, next) => {
 })
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'CanteenOne API', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }))
 app.get('/api/shops', async (_req, res, next) => {
-  try { res.json({ shops: await Promise.all(shops.map(menuForShop)) }) } catch (err) { next(err) }
+  try {
+    const [stocks, savedItems, states] = await Promise.all([ProductStock.find().lean(), MenuItem.find().lean(), ShopState.find().lean()])
+    const sharedData = { stocks, savedItems, states }
+    res.json({ shops: await Promise.all(shops.map((shop) => menuForShop(shop, sharedData))) })
+  } catch (err) { next(err) }
 })
 app.get('/api/shops/:shopId', async (req, res, next) => {
   try {
@@ -139,8 +170,10 @@ app.post('/api/payments/demo', auth, requireRole('student'), async (req, res, ne
 app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => {
   try {
     const { shopId, note = '', items, readyInMinutes, paymentId } = req.body ?? {}
-    const shop = findShop(shopId)
-    if (!shop) return res.status(400).json({ error: 'Choose a valid canteen.' })
+    const baseShop = findShop(shopId)
+    if (!baseShop) return res.status(400).json({ error: 'Choose a valid canteen.' })
+    const shop = await menuForShop(baseShop)
+    if (!shop.isOpen) return res.status(409).json({ error: 'This canteen is currently closed to new orders.' })
     if (typeof note !== 'string' || note.length > 120) return res.status(400).json({ error: 'Order notes must be 120 characters or fewer.' })
     if (![15, 30, 45].includes(Number(readyInMinutes))) return res.status(400).json({ error: 'Choose a ready time between 15 and 45 minutes.' })
     if (!Array.isArray(items) || items.length < 1 || items.length > 30) return res.status(400).json({ error: 'Add between 1 and 30 menu items.' })
@@ -148,12 +181,10 @@ app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => 
     for (const item of items) {
       const product = shop.products.find((entry) => entry.id === item.productId)
       if (!product) return res.status(400).json({ error: 'One selected item is not sold by this canteen.' })
-      const stock = await ProductStock.findOne({ shopId, productId: product.id }).lean()
-      if (stock && !stock.inStock) return res.status(409).json({ error: `${product.name} is currently out of stock.` })
+      if (!product.inStock) return res.status(409).json({ error: `${product.name} is currently out of stock.` })
       const quantity = Number(item.quantity)
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) return res.status(400).json({ error: 'Item quantities must be between 1 and 20.' })
-      const onlinePrice = Math.max(1, product.price - 1)
-      lineItems.push({ productId: product.id, name: product.name, offlinePrice: product.price, unitPrice: onlinePrice, quantity, lineTotal: onlinePrice * quantity })
+      lineItems.push({ productId: product.id, name: product.name, offlinePrice: product.offlinePrice, unitPrice: product.price, quantity, lineTotal: product.price * quantity })
     }
     const total = lineItems.reduce((sum, item) => sum + item.lineTotal, 0)
     const payment = await Payment.findOneAndUpdate({ _id: paymentId, studentId: req.user._id, status: 'paid', used: false, amount: total }, { $set: { used: true } }, { new: true })
@@ -165,14 +196,16 @@ app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => 
       studentId: req.user._id, studentName: req.user.name, note: note.trim(), items: lineItems, total,
       savings: lineItems.reduce((sum, item) => sum + item.quantity, 0),
       payment: { receipt: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, method: payment.method, paidAt: payment.createdAt },
-      readyInMinutes: Number(readyInMinutes), createdAt: now, readyAt: new Date(now.getTime() + Number(readyInMinutes) * 60_000), status: 'new',
+      readyInMinutes: Number(readyInMinutes), createdAt: now, readyAt: new Date(now.getTime() + Number(readyInMinutes) * 60_000), status: 'accepted',
     })
     res.status(201).json({ order: orderJson(order) })
   } catch (err) { next(err) }
 })
 app.get('/api/orders', auth, async (req, res, next) => {
   try {
-    const filter = req.user.role === 'vendor' ? { shopId: req.user.shopId } : { studentId: req.user._id }
+    const filter = req.user.role === 'vendor'
+      ? { shopId: req.user.shopId, createdAt: indiaDayBounds() }
+      : { studentId: req.user._id }
     const list = await Order.find(filter).sort({ createdAt: -1 }).lean()
     res.json({ orders: list.map((order) => ({ ...order, id: order.orderNo })) })
   } catch (err) { next(err) }
@@ -181,7 +214,7 @@ app.patch('/api/orders/:orderId/status', auth, requireRole('vendor'), async (req
   try {
     const order = await Order.findOne({ orderNo: req.params.orderId, shopId: req.user.shopId })
     if (!order) return res.status(404).json({ error: 'Order not found for your canteen.' })
-    const transitions = { new: 'accepted', accepted: 'preparing', preparing: 'ready', ready: 'delivered' }
+    const transitions = { new: 'preparing', accepted: 'preparing', preparing: 'ready', ready: 'delivered' }
     if (transitions[order.status] !== req.body?.status) return res.status(409).json({ error: 'Move this order to its next step in the queue.' })
     order.status = req.body.status
     if (order.status === 'delivered') order.deliveredAt = new Date()
@@ -192,17 +225,83 @@ app.patch('/api/orders/:orderId/status', auth, requireRole('vendor'), async (req
 app.patch('/api/vendor/products/:productId/stock', auth, requireRole('vendor'), async (req, res, next) => {
   try {
     const shop = findShop(req.user.shopId)
-    const product = shop?.products.find((item) => item.id === req.params.productId)
-    if (!product) return res.status(404).json({ error: 'Menu item not found for your canteen.' })
+    const product = shop && await findProductForShop(shop.id, req.params.productId)
+    if (!shop || !product) return res.status(404).json({ error: 'Menu item not found for your canteen.' })
     if (typeof req.body?.inStock !== 'boolean') return res.status(400).json({ error: 'Choose whether this item is in stock.' })
     const stock = await ProductStock.findOneAndUpdate({ shopId: shop.id, productId: product.id }, { $set: { inStock: req.body.inStock } }, { new: true, upsert: true, setDefaultsOnInsert: true })
     res.json({ product: { ...product, offlinePrice: product.price, price: Math.max(1, product.price - 1), inStock: stock.inStock } })
   } catch (err) { next(err) }
 })
+app.patch('/api/vendor/shop/status', auth, requireRole('vendor'), async (req, res, next) => {
+  try {
+    if (typeof req.body?.isOpen !== 'boolean') return res.status(400).json({ error: 'Choose whether your canteen is open.' })
+    const state = await ShopState.findOneAndUpdate({ shopId: req.user.shopId }, { $set: { isOpen: req.body.isOpen } }, { new: true, upsert: true, setDefaultsOnInsert: true })
+    res.json({ isOpen: state.isOpen })
+  } catch (err) { next(err) }
+})
+app.post('/api/vendor/cloudinary-signature', auth, requireRole('vendor'), (_req, res) => {
+  const { CLOUDINARY_CLOUD_NAME: cloudName, CLOUDINARY_API_KEY: apiKey, CLOUDINARY_API_SECRET: apiSecret } = process.env
+  if (!cloudName || !apiKey || !apiSecret) return res.status(503).json({ error: 'Cloudinary is not configured yet. Add its credentials to the server environment.' })
+  const timestamp = Math.floor(Date.now() / 1000)
+  const folder = `canteenone/${_req.user.shopId}`
+  const signature = createHash('sha1').update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`).digest('hex')
+  res.json({ cloudName, apiKey, timestamp, folder, signature })
+})
+app.post('/api/vendor/products', auth, requireRole('vendor'), async (req, res, next) => {
+  try {
+    const { name, description = '', category, price, image, prepTime = 10 } = req.body ?? {}
+    const cleanName = typeof name === 'string' ? name.trim() : ''
+    const cleanCategory = typeof category === 'string' ? category.trim() : ''
+    const offlinePrice = Number(price)
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME
+    if (cleanName.length < 2 || cleanName.length > 90) return res.status(400).json({ error: 'Enter a product name from 2 to 90 characters.' })
+    if (!cleanCategory || cleanCategory.length > 40) return res.status(400).json({ error: 'Enter a category up to 40 characters.' })
+    if (!Number.isInteger(offlinePrice) || offlinePrice < 2 || offlinePrice > 10000) return res.status(400).json({ error: 'Enter an offline price of ₹2 or more.' })
+    if (typeof description !== 'string' || description.length > 240) return res.status(400).json({ error: 'Description must be 240 characters or fewer.' })
+    if (!cloudName || typeof image !== 'string' || !image.startsWith(`https://res.cloudinary.com/${cloudName}/image/upload/`)) return res.status(400).json({ error: 'Upload a product image to this CanteenOne Cloudinary account.' })
+    const prep = Number(prepTime)
+    if (!Number.isInteger(prep) || prep < 1 || prep > 120) return res.status(400).json({ error: 'Preparation time must be between 1 and 120 minutes.' })
+    const productId = `vendor-${randomUUID()}`
+    const item = await MenuItem.create({ shopId: req.user.shopId, productId, name: cleanName, description: description.trim(), category: cleanCategory, price: offlinePrice, image, prepTime: prep, badge: 'NEW' })
+    const stock = await ProductStock.create({ shopId: req.user.shopId, productId, inStock: true })
+    res.status(201).json({ product: { id: item.productId, name: item.name, description: item.description, category: item.category, offlinePrice: item.price, price: Math.max(1, item.price - 1), image: item.image, prepTime: item.prepTime, badge: item.badge, inStock: stock.inStock } })
+  } catch (err) { next(err) }
+})
+app.delete('/api/vendor/products/:productId', auth, requireRole('vendor'), async (req, res, next) => {
+  try {
+    const shop = findShop(req.user.shopId)
+    const productId = req.params.productId
+    const original = shop?.products.find((item) => item.id === productId)
+    if (!shop) return res.status(404).json({ error: 'Canteen not found.' })
+    if (original) {
+      await MenuItem.findOneAndUpdate({ shopId: shop.id, productId }, { $set: { isDeleted: true }, $setOnInsert: { name: original.name, description: original.description || '', category: original.category, price: original.price, image: original.image } }, { upsert: true, new: true })
+    } else {
+      const deleted = await MenuItem.deleteOne({ shopId: shop.id, productId, isDeleted: false })
+      if (!deleted.deletedCount) return res.status(404).json({ error: 'Menu item not found for your canteen.' })
+    }
+    await ProductStock.deleteOne({ shopId: shop.id, productId })
+    res.json({ ok: true, productId })
+  } catch (err) { next(err) }
+})
+app.get('/api/admin/reviews', auth, requireRole('admin'), async (_req, res, next) => {
+  try {
+    const [reviews, savedItems] = await Promise.all([Review.find().sort({ createdAt: -1 }).limit(300).lean(), MenuItem.find({ isDeleted: false }).lean()])
+    const productsByKey = new Map()
+    for (const shop of shops) for (const product of shop.products) productsByKey.set(`${shop.id}:${product.id}`, product.name)
+    for (const product of savedItems) productsByKey.set(`${product.shopId}:${product.productId}`, product.name)
+    const result = reviews.map((review) => ({
+      id: String(review._id), shopId: review.shopId, shopName: findShop(review.shopId)?.name || review.shopId,
+      productName: productsByKey.get(`${review.shopId}:${review.productId}`) || review.productId,
+      studentName: review.studentName, rating: review.rating, comment: review.comment, createdAt: review.createdAt,
+    }))
+    res.json({ reviews: result })
+  } catch (err) { next(err) }
+})
+
 app.get('/api/reviews', async (req, res, next) => {
   try {
     const { shopId, productId } = req.query
-    if (!findShop(shopId)?.products.some((product) => product.id === productId)) return res.status(400).json({ error: 'Choose a valid menu item.' })
+    if (!await findProductForShop(shopId, productId)) return res.status(400).json({ error: 'Choose a valid menu item.' })
     const reviews = await Review.find({ shopId, productId }).sort({ createdAt: -1 }).lean()
     const average = reviews.length ? reviews.reduce((sum, item) => sum + item.rating, 0) / reviews.length : 0
     res.json({ reviews, count: reviews.length, average: Number(average.toFixed(1)) })
@@ -211,7 +310,7 @@ app.get('/api/reviews', async (req, res, next) => {
 app.post('/api/reviews', auth, requireRole('student'), async (req, res, next) => {
   try {
     const { shopId, productId, rating, comment } = req.body ?? {}
-    if (!findShop(shopId)?.products.some((product) => product.id === productId)) return res.status(400).json({ error: 'Choose a valid menu item.' })
+    if (!await findProductForShop(shopId, productId)) return res.status(400).json({ error: 'Choose a valid menu item.' })
     if (!Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5) return res.status(400).json({ error: 'Choose a rating from 1 to 5.' })
     if (typeof comment !== 'string' || comment.trim().length < 2 || comment.length > 500) return res.status(400).json({ error: 'Write a comment between 2 and 500 characters.' })
     const review = await Review.create({ shopId, productId, studentId: req.user._id, studentName: req.user.name, rating: Number(rating), comment: comment.trim() })

@@ -14,6 +14,7 @@ export default defineConfig({
       input: {
         student: resolve(clientRoot, 'index.html'),
         vendor: resolve(clientRoot, 'vendor.html'),
+        admin: resolve(clientRoot, 'admin.html'),
       },
     },
   },
