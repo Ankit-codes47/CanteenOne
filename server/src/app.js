@@ -7,7 +7,7 @@ import { Account, MenuItem, Order, Payment, ProductStock, Review, Session, ShopS
 
 const app = express()
 
-const publicUser = (user) => ({ id: String(user._id), name: user.name, email: user.email, vendorId: user.vendorId || null, role: user.role, shopId: user.shopId || null })
+const publicUser = (user) => ({ id: String(user._id), name: user.name, email: user.email, vendorId: user.vendorId || null, adminId: user.adminId || null, role: user.role, shopId: user.shopId || null })
 const findShop = (shopId) => shops.find((item) => item.id === shopId)
 async function findProductForShop(shopId, productId) {
   const saved = await MenuItem.findOne({ shopId, productId }).lean()
@@ -87,14 +87,18 @@ async function seedMongo() {
     { shopId: 'ke7', name: 'KE7 Vendor', email: 'ke7@canteenone.demo', vendorId: 'CTN-KE7-01', password: 'ke71234' },
     { shopId: 'mr-sandwich', name: 'Mr. Sandwich Vendor', email: 'sandwich@canteenone.demo', vendorId: 'CTN-SANDWICH-01', password: 'sandwich1234' },
   ]
-  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() || 'admin@canteenone.local'
   const adminPassword = process.env.ADMIN_PASSWORD
-  if (adminEmail && adminPassword) vendorSeeds.push({ name: process.env.ADMIN_NAME || 'CanteenOne Admin', email: adminEmail, password: adminPassword, role: 'admin' })
+  if (adminPassword) vendorSeeds.push({ name: process.env.ADMIN_NAME || 'CanteenOne Admin', email: adminEmail, adminId: process.env.ADMIN_ID?.trim().toUpperCase() || 'CTN-ADMIN-01', password: adminPassword, role: 'admin' })
   const accountOps = vendorSeeds.map((seed) => {
     const { salt, passwordHash } = passwordParts(seed.password)
     const account = { name: seed.name, email: seed.email, role: seed.role || 'vendor', salt, passwordHash }
     if (seed.vendorId) Object.assign(account, { vendorId: seed.vendorId, shopId: seed.shopId })
-    return { updateOne: { filter: seed.vendorId ? { vendorId: seed.vendorId } : { email: seed.email }, update: { $setOnInsert: account }, upsert: true } }
+    if (seed.adminId) account.adminId = seed.adminId
+    const filter = seed.vendorId ? { vendorId: seed.vendorId } : { email: seed.email }
+    const update = { $setOnInsert: account }
+    if (seed.adminId) update.$set = { adminId: seed.adminId }
+    return { updateOne: { filter, update, upsert: true } }
   })
   const stateOps = shops.map((shop) => ({ updateOne: { filter: { shopId: shop.id }, update: { $setOnInsert: { shopId: shop.id, isOpen: true } }, upsert: true } }))
   const stockOps = shops.flatMap((shop) => shop.products.map((product) => {
@@ -145,7 +149,7 @@ app.post('/api/auth/register', async (req, res, next) => {
 app.post('/api/auth/login', async (req, res, next) => {
   try {
     const identifier = String(req.body?.identifier || req.body?.email || '').trim()
-    const user = await Account.findOne({ $or: [{ email: identifier.toLowerCase() }, { vendorId: identifier.toUpperCase() }] }).select('+passwordHash +salt')
+    const user = await Account.findOne({ $or: [{ email: identifier.toLowerCase() }, { vendorId: identifier.toUpperCase() }, { adminId: identifier.toUpperCase() }] }).select('+passwordHash +salt')
     if (!user || typeof req.body?.password !== 'string' || !passwordMatches(user, req.body.password)) return res.status(401).json({ error: 'ID or password is incorrect.' })
     if (req.body?.role && user.role !== req.body.role) return res.status(403).json({ error: 'Use the correct sign-in page for this account.' })
     if (user.role === 'vendor' && !findShop(user.shopId)) return res.status(403).json({ error: 'This vendor account is not linked to an active canteen.' })
