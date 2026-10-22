@@ -85,31 +85,6 @@ function passwordMatches(user, password) {
   const candidate = scryptSync(password, user.salt, 64)
   return timingSafeEqual(candidate, Buffer.from(user.passwordHash, 'hex'))
 }
-function normalizePhone(value) {
-  const raw = String(value || '').trim()
-  if (/^\d{10}$/.test(raw)) return `+91${raw}`
-  if (/^\+\d{8,15}$/.test(raw)) return raw
-  return null
-}
-function twilioVerifyConfig() {
-  const { TWILIO_ACCOUNT_SID: accountSid, TWILIO_AUTH_TOKEN: authToken, TWILIO_VERIFY_SERVICE_SID: serviceSid } = process.env
-  return accountSid && authToken && serviceSid ? { accountSid, authToken, serviceSid } : null
-}
-async function twilioVerifyRequest(endpoint, values) {
-  const config = twilioVerifyConfig()
-  if (!config) throw Object.assign(new Error('Phone OTP is not configured. Add the Twilio Verify settings to the server environment.'), { status: 503 })
-  const response = await fetch(`https://verify.twilio.com/v2/Services/${config.serviceSid}/${endpoint}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64')}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams(values),
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw Object.assign(new Error(data.message || 'Could not send or verify the code. Please try again.'), { status: response.status === 429 ? 429 : 400 })
-  return data
-}
 function orderJson(order) {
   return { ...order.toObject(), id: order.orderNo, createdAt: order.createdAt?.toISOString(), readyAt: order.readyAt?.toISOString(), deliveredAt: order.deliveredAt?.toISOString() || null }
 }
@@ -227,35 +202,6 @@ app.get('/api/shops/:shopId', async (req, res, next) => {
     const shop = findShop(req.params.shopId)
     if (!shop) return res.status(404).json({ error: 'Canteen not found.' })
     res.json({ shop: await menuForShop(shop) })
-  } catch (err) { next(err) }
-})
-app.post('/api/auth/otp/send', async (req, res, next) => {
-  try {
-    const phone = normalizePhone(req.body?.phone)
-    if (!phone) return res.status(400).json({ error: 'Enter a valid mobile number with country code, or a 10-digit Indian number.' })
-    const result = await twilioVerifyRequest('Verifications', { To: phone, Channel: 'sms' })
-    res.json({ sent: result.status === 'pending', phone })
-  } catch (err) { next(err) }
-})
-app.post('/api/auth/otp/verify', async (req, res, next) => {
-  try {
-    const phone = normalizePhone(req.body?.phone)
-    const code = String(req.body?.code || '').trim()
-    const mode = req.body?.mode === 'register' ? 'register' : 'login'
-    const name = String(req.body?.name || '').trim()
-    if (!phone) return res.status(400).json({ error: 'Enter a valid mobile number.' })
-    if (!/^\d{4}$/.test(code)) return res.status(400).json({ error: 'Enter the 4-digit OTP.' })
-    if (mode === 'register' && (name.length < 2 || name.length > 80)) return res.status(400).json({ error: 'Enter your name (2–80 characters).' })
-    const verification = await twilioVerifyRequest('VerificationCheck', { To: phone, Code: code })
-    if (verification.status !== 'approved') return res.status(401).json({ error: 'That code is incorrect or has expired. Try again.' })
-    let account = await Account.findOne({ phone, role: 'student' })
-    if (!account && mode !== 'register') return res.status(404).json({ error: 'No account is registered with this number. Choose Create account and verify it to register.' })
-    if (!account) {
-      const email = `student-${phone.replace(/\D/g, '')}@phone.canteenone.invalid`
-      account = await Account.create({ name, phone, email, role: 'student', ...passwordParts(randomBytes(32).toString('hex')) })
-    }
-    const token = await createSession(account)
-    res.json({ token, user: publicUser(account) })
   } catch (err) { next(err) }
 })
 app.post('/api/auth/register', async (req, res, next) => {

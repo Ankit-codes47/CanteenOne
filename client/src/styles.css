@@ -62,7 +62,3 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .admin-shop-tile small{color:var(--muted);font-size:9px}
 @media(max-width:1000px){.admin-shop-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:650px){.admin-shop-picker{padding:11px}.admin-shop-picker-heading{align-items:flex-start}.admin-shop-picker-heading h2{max-width:230px;font-size:13px;line-height:1.4}.admin-shop-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.admin-shop-tile{gap:7px;padding:7px}.admin-shop-logo{width:32px;height:32px}.admin-shop-tile strong{font-size:9px}.admin-shop-tile small{font-size:8px}}
-.otp-helper{margin:-8px 0 14px;color:#81837a;font-size:10px;line-height:1.5}
-.otp-actions{display:flex;justify-content:space-between;margin-top:12px}
-.otp-actions button{border:0;background:transparent;padding:5px 0;color:var(--green);font-size:10px;font-weight:700}
-.otp-actions button:disabled{opacity:.55}
