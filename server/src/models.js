@@ -42,10 +42,14 @@ const paymentSchema = new mongoose.Schema({
   _id: { type: String },
   studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', required: true },
   amount: { type: Number, required: true },
-  status: { type: String, enum: ['paid'], default: 'paid' },
+  currency: { type: String, default: 'INR' },
+  status: { type: String, enum: ['created', 'paid', 'failed'], default: 'created' },
   used: { type: Boolean, default: false },
-  mode: { type: String, default: 'demo' },
-  method: { type: String, enum: ['upi', 'card', 'netbanking'], default: 'upi' },
+  mode: { type: String, enum: ['demo', 'razorpay'], default: 'razorpay' },
+  method: { type: String, default: '' },
+  razorpayOrderId: { type: String, unique: true, sparse: true },
+  razorpayPaymentId: { type: String, unique: true, sparse: true },
+  checkoutData: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { timestamps: true })
 
 const orderSchema = new mongoose.Schema({
@@ -69,6 +73,7 @@ const orderSchema = new mongoose.Schema({
 }, { timestamps: true })
 orderSchema.index({ shopId: 1, createdAt: -1 })
 orderSchema.index({ studentId: 1, createdAt: -1 })
+orderSchema.index({ 'payment.receipt': 1 }, { unique: true, sparse: true })
 
 const reviewSchema = new mongoose.Schema({
   shopId: { type: String, required: true, index: true },

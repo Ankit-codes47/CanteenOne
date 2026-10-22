@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import mongoose from 'mongoose'
-import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto'
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash, createHmac } from 'node:crypto'
 import { shops } from './data.js'
 import { Account, MenuItem, Order, Payment, ProductStock, Review, Session, ShopState } from './models.js'
 
@@ -14,6 +14,61 @@ async function findProductForShop(shopId, productId) {
   if (saved?.isDeleted) return null
   const original = findShop(shopId)?.products.find((item) => item.id === productId)
   return original || (saved && !saved.isDeleted ? saved : null)
+}
+function razorpayCredentials() {
+  const keyId = process.env.RAZORPAY_KEY_ID
+  const keySecret = process.env.RAZORPAY_KEY_SECRET
+  return keyId && keySecret ? { keyId, keySecret } : null
+}
+async function razorpayRequest(path, { method = 'GET', body } = {}) {
+  const credentials = razorpayCredentials()
+  if (!credentials) throw Object.assign(new Error('Razorpay is not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to the server environment.'), { status: 503 })
+  const response = await fetch(`https://api.razorpay.com/v1/${path}`, {
+    method,
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${credentials.keyId}:${credentials.keySecret}`).toString('base64')}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw Object.assign(new Error(data.error?.description || 'Razorpay could not process the payment request.'), { status: response.status >= 500 ? 502 : 400 })
+  return data
+}
+function secureStringEqual(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false
+  const leftBuffer = Buffer.from(left)
+  const rightBuffer = Buffer.from(right)
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
+}
+async function createOrderFromCapturedPayment(payment, razorpayPayment) {
+  const previous = await Order.findOne({ 'payment.receipt': razorpayPayment.id })
+  if (previous) return previous
+  const checkout = payment.checkoutData
+  if (!checkout || !Array.isArray(checkout.items) || !checkout.items.length) throw Object.assign(new Error('The saved checkout details are missing.'), { status: 409 })
+  if (razorpayPayment.order_id !== payment.razorpayOrderId || razorpayPayment.amount !== Math.round(payment.amount * 100) || razorpayPayment.currency !== payment.currency) {
+    throw Object.assign(new Error('The captured payment does not match this order.'), { status: 409 })
+  }
+  const paidAt = razorpayPayment.created_at ? new Date(razorpayPayment.created_at * 1000) : new Date()
+  await Payment.updateOne({ _id: payment._id }, { $set: { status: 'paid', razorpayPaymentId: razorpayPayment.id, method: razorpayPayment.method || '', used: true } })
+  const orderNo = randomUUID().slice(0, 8).toUpperCase()
+  try {
+    return await Order.create({
+      orderNo, token: `C1-${orderNo}`, shopId: checkout.shopId, shopName: checkout.shopName,
+      shopEmoji: checkout.shopEmoji, shopLogo: checkout.shopLogo, studentId: payment.studentId,
+      studentName: checkout.studentName, note: checkout.note, items: checkout.items, total: payment.amount,
+      savings: checkout.items.reduce((sum, item) => sum + item.quantity, 0),
+      payment: { receipt: razorpayPayment.id, amount: payment.amount, status: 'captured', mode: 'razorpay', method: razorpayPayment.method || '', paidAt },
+      readyInMinutes: checkout.readyInMinutes, createdAt: paidAt,
+      readyAt: new Date(paidAt.getTime() + checkout.readyInMinutes * 60_000), status: 'accepted',
+    })
+  } catch (err) {
+    if (err?.code === 11000) {
+      const duplicate = await Order.findOne({ 'payment.receipt': razorpayPayment.id })
+      if (duplicate) return duplicate
+    }
+    throw err
+  }
 }
 function indiaDayBounds(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
@@ -108,6 +163,23 @@ async function seedMongo() {
 }
 
 app.use(cors())
+app.post('/api/webhooks/razorpay', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res, next) => {
+  try {
+    await connectDatabase()
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET
+    if (!webhookSecret) return res.status(503).json({ error: 'Razorpay webhook is not configured.' })
+    const signature = req.headers['x-razorpay-signature']
+    const expected = createHmac('sha256', webhookSecret).update(req.body).digest('hex')
+    if (!secureStringEqual(signature, expected)) return res.status(400).json({ error: 'Invalid webhook signature.' })
+    const event = JSON.parse(req.body.toString('utf8'))
+    if (event.event === 'payment.captured') {
+      const paid = event.payload?.payment?.entity
+      const payment = paid?.order_id && await Payment.findOne({ razorpayOrderId: paid.order_id })
+      if (payment) await createOrderFromCapturedPayment(payment, paid)
+    }
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
 app.use(express.json({ limit: '32kb' }))
 app.use(async (_req, _res, next) => {
   try {
@@ -159,20 +231,9 @@ app.post('/api/auth/login', async (req, res, next) => {
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: publicUser(req.user) }))
 app.post('/api/auth/logout', auth, async (req, res, next) => { try { await Session.deleteOne({ tokenHash: req.sessionTokenHash }); res.json({ ok: true }) } catch (err) { next(err) } })
 
-// Presentation payment only. Replace with a real payment gateway before collecting money.
-app.post('/api/payments/demo', auth, requireRole('student'), async (req, res, next) => {
+app.post('/api/payments/razorpay/order', auth, requireRole('student'), async (req, res, next) => {
   try {
-    const amount = Number(req.body?.amount)
-    const method = String(req.body?.method || 'upi')
-    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Invalid payment amount.' })
-    if (!['upi', 'card', 'netbanking'].includes(method)) return res.status(400).json({ error: 'Choose a supported payment method.' })
-    const payment = await Payment.create({ _id: `PAY-${randomUUID().slice(0, 8).toUpperCase()}`, studentId: req.user._id, amount, status: 'paid', mode: 'demo', method })
-    res.status(201).json({ payment: { id: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, method: payment.method, paidAt: payment.createdAt } })
-  } catch (err) { next(err) }
-})
-app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => {
-  try {
-    const { shopId, note = '', items, readyInMinutes, paymentId } = req.body ?? {}
+    const { shopId, items, note = '', readyInMinutes } = req.body ?? {}
     const baseShop = findShop(shopId)
     if (!baseShop) return res.status(400).json({ error: 'Choose a valid canteen.' })
     const shop = await menuForShop(baseShop)
@@ -189,19 +250,35 @@ app.post('/api/orders', auth, requireRole('student'), async (req, res, next) => 
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) return res.status(400).json({ error: 'Item quantities must be between 1 and 20.' })
       lineItems.push({ productId: product.id, name: product.name, offlinePrice: product.offlinePrice, unitPrice: product.price, quantity, lineTotal: product.price * quantity })
     }
-    const total = lineItems.reduce((sum, item) => sum + item.lineTotal, 0)
-    const payment = await Payment.findOneAndUpdate({ _id: paymentId, studentId: req.user._id, status: 'paid', used: false, amount: total }, { $set: { used: true } }, { new: true })
-    if (!payment) return res.status(402).json({ error: 'Complete payment for this exact total before placing the order.' })
-    const now = new Date()
-    const orderNo = randomUUID().slice(0, 8).toUpperCase()
-    const order = await Order.create({
-      orderNo, token: `C1-${orderNo}`, shopId, shopName: shop.name, shopEmoji: shop.emoji, shopLogo: shop.logo,
-      studentId: req.user._id, studentName: req.user.name, note: note.trim(), items: lineItems, total,
-      savings: lineItems.reduce((sum, item) => sum + item.quantity, 0),
-      payment: { receipt: payment._id, amount: payment.amount, status: payment.status, mode: payment.mode, method: payment.method, paidAt: payment.createdAt },
-      readyInMinutes: Number(readyInMinutes), createdAt: now, readyAt: new Date(now.getTime() + Number(readyInMinutes) * 60_000), status: 'accepted',
-    })
-    res.status(201).json({ order: orderJson(order) })
+    const amount = lineItems.reduce((sum, item) => sum + item.lineTotal, 0)
+    if (!Number.isSafeInteger(amount) || amount < 1) return res.status(400).json({ error: 'The order total is invalid.' })
+    const gatewayOrder = await razorpayRequest('orders', { method: 'POST', body: {
+      amount: amount * 100, currency: 'INR', receipt: `C1-${randomUUID().replaceAll('-', '').slice(0, 20)}`,
+      notes: { studentId: String(req.user._id), shopId },
+    } })
+    const payment = await Payment.create({ _id: `PAY-${randomUUID().slice(0, 8).toUpperCase()}`, studentId: req.user._id, amount, currency: 'INR', status: 'created', mode: 'razorpay', razorpayOrderId: gatewayOrder.id, checkoutData: {
+      shopId, shopName: shop.name, shopEmoji: shop.emoji, shopLogo: shop.logo,
+      studentName: req.user.name, note: note.trim(), items: lineItems, readyInMinutes: Number(readyInMinutes),
+    } })
+    res.status(201).json({ keyId: razorpayCredentials()?.keyId, amount: gatewayOrder.amount, currency: gatewayOrder.currency, razorpayOrderId: gatewayOrder.id, paymentId: payment._id, merchantName: 'CanteenOne', shopName: shop.name, student: { name: req.user.name, email: req.user.email } })
+  } catch (err) { next(err) }
+})
+app.post('/api/payments/razorpay/verify', auth, requireRole('student'), async (req, res, next) => {
+  try {
+    const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = req.body ?? {}
+    if (typeof orderId !== 'string' || typeof paymentId !== 'string' || typeof signature !== 'string') return res.status(400).json({ error: 'Razorpay did not return complete payment details.' })
+    const payment = await Payment.findOne({ razorpayOrderId: orderId, studentId: req.user._id, mode: 'razorpay' })
+    if (!payment) return res.status(404).json({ error: 'Checkout session not found. Please start checkout again.' })
+    const { keySecret } = razorpayCredentials() || {}
+    if (!keySecret) return res.status(503).json({ error: 'Razorpay is not configured.' })
+    const expected = createHmac('sha256', keySecret).update(`${payment.razorpayOrderId}|${paymentId}`).digest('hex')
+    if (!secureStringEqual(signature, expected)) return res.status(400).json({ error: 'Payment verification failed. No order was placed.' })
+    let gatewayPayment = await razorpayRequest(`payments/${encodeURIComponent(paymentId)}`)
+    if (gatewayPayment.order_id !== payment.razorpayOrderId || gatewayPayment.amount !== Math.round(payment.amount * 100) || gatewayPayment.currency !== payment.currency) return res.status(400).json({ error: 'The payment details do not match your cart.' })
+    if (gatewayPayment.status === 'authorized') gatewayPayment = await razorpayRequest(`payments/${encodeURIComponent(paymentId)}/capture`, { method: 'POST', body: { amount: gatewayPayment.amount, currency: gatewayPayment.currency } })
+    if (gatewayPayment.status !== 'captured') return res.status(402).json({ error: 'Payment has not been captured. Please check your payment status before retrying.' })
+    const order = await createOrderFromCapturedPayment(payment, gatewayPayment)
+    res.json({ order: orderJson(order) })
   } catch (err) { next(err) }
 })
 app.get('/api/orders', auth, async (req, res, next) => {
@@ -324,7 +401,9 @@ app.post('/api/reviews', auth, requireRole('student'), async (req, res, next) =>
 app.use((err, _req, res, _next) => {
   console.error(err)
   if (err?.code === 11000) return res.status(409).json({ error: 'That account already exists.' })
-  res.status(500).json({ error: 'The server could not complete that request.' })
+  const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 500
+  const message = status === 500 ? 'The server could not complete that request.' : err.message
+  res.status(status).json({ error: message })
 })
 
 let databasePromise

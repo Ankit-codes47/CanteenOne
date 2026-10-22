@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, Building2, Check, ChevronDown, ClipboardList, Clock3, CreditCard, LogIn, LogOut, Minus, Plus, Search, ShoppingBag, Smartphone, UtensilsCrossed, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, ClipboardList, Clock3, LogIn, LogOut, Minus, Plus, Search, ShoppingBag, UtensilsCrossed, X } from 'lucide-react'
 
 const money = (amount) => `₹${Number(amount).toFixed(0)}`
 const statusNames = { new: 'Received', accepted: 'Paid · queued', preparing: 'Preparing', ready: 'Ready for pickup', delivered: 'Delivered' }
@@ -18,6 +18,19 @@ async function request(path, options = {}, token = localStorage.getItem('canteen
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Something went wrong. Please try again.')
   return data
+}
+
+let razorpayScriptPromise
+function loadRazorpayCheckout() {
+  if (window.Razorpay) return Promise.resolve(true)
+  if (!razorpayScriptPromise) razorpayScriptPromise = new Promise((resolve) => {
+    const script = document.createElement('script')
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js'
+    script.onload = () => resolve(true)
+    script.onerror = () => { razorpayScriptPromise = null; resolve(false) }
+    document.body.appendChild(script)
+  })
+  return razorpayScriptPromise
 }
 
 export default function App() {
@@ -42,7 +55,6 @@ export default function App() {
   const [checkoutOpen, setCheckoutOpen] = useState(false)
   const [note, setNote] = useState('')
   const [readyInMinutes, setReadyInMinutes] = useState(15)
-  const [paymentMethod, setPaymentMethod] = useState('upi')
   const [myOrders, setMyOrders] = useState([])
   const [orderNotice, setOrderNotice] = useState('')
   const knownStatuses = useRef(null)
@@ -174,11 +186,25 @@ export default function App() {
     if (selectedShop?.isOpen === false) { setError('This canteen is currently closed to new orders.'); return }
     setBusy(true); setError('')
     try {
-      const payment = await request('/api/payments/demo', { method: 'POST', body: JSON.stringify({ amount: subtotal, method: paymentMethod }) }, token)
-      const created = await request('/api/orders', { method: 'POST', body: JSON.stringify({ shopId: selectedShopId, items: cart.map((item) => ({ productId: item.id, quantity: item.quantity })), note, readyInMinutes, paymentId: payment.payment.id }) }, token)
-      setReceipt(created.order); setCart([]); setNote(''); setCheckoutOpen(false); setCartOpen(false)
-      await loadStudentOrders()
-    } catch (err) { setError(err.message) } finally { setBusy(false) }
+      const checkout = await request('/api/payments/razorpay/order', { method: 'POST', body: JSON.stringify({ shopId: selectedShopId, items: cart.map((item) => ({ productId: item.id, quantity: item.quantity })), note, readyInMinutes }) }, token)
+      if (!await loadRazorpayCheckout()) throw new Error('Razorpay Checkout could not load. Check your internet connection and try again.')
+      const options = {
+        key: checkout.keyId, amount: checkout.amount, currency: checkout.currency,
+        name: checkout.merchantName, description: `${checkout.shopName} · campus pickup`, order_id: checkout.razorpayOrderId,
+        prefill: checkout.student, theme: { color: '#287451' },
+        handler: async (response) => {
+          try {
+            const confirmed = await request('/api/payments/razorpay/verify', { method: 'POST', body: JSON.stringify(response) }, token)
+            setReceipt(confirmed.order); setCart([]); setNote(''); setCheckoutOpen(false); setCartOpen(false)
+            await loadStudentOrders()
+          } catch (err) { setError(err.message) } finally { setBusy(false) }
+        },
+        modal: { ondismiss: () => setBusy(false) },
+      }
+      const razorpay = new window.Razorpay(options)
+      razorpay.on('payment.failed', (response) => { setError(response.error?.description || 'Payment was not completed. You can try again.'); setBusy(false) })
+      razorpay.open()
+    } catch (err) { setError(err.message); setBusy(false) }
   }
 
   async function loadStudentOrders() {
@@ -227,7 +253,7 @@ export default function App() {
 
     {cartOpen && <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && setCartOpen(false)}><aside className="drawer"><div className="drawer-heading"><div><span className="eyebrow muted">{selectedShop?.name}</span><h2>Your order <span>({cartCount})</span></h2></div><button className="icon-button" onClick={() => setCartOpen(false)}><X /></button></div>{cart.length === 0 ? <div className="empty-message">Your cart is empty. Add something from the menu.</div> : <><div className="cart-items">{cart.map((item) => <div className="cart-item" key={item.id}><img src={item.image} alt="" /><div className="cart-item-info"><strong>{item.name}</strong><small>{money(item.price)} each</small><div className="quantity"><button onClick={() => changeQuantity(item.id, -1)}><Minus size={13} /></button><span>{item.quantity}</span><button onClick={() => changeQuantity(item.id, 1)}><Plus size={13} /></button></div></div><b>{money(item.price * item.quantity)}</b></div>)}</div><div className="cart-bottom"><div className="subtotal"><span>Total</span><strong>{money(subtotal)}</strong></div><small>Online payment · Choose pickup time at checkout</small><button className="primary-button full" disabled={selectedShop?.isOpen === false} onClick={() => { setCartOpen(false); setCheckoutOpen(true) }}>{selectedShop?.isOpen === false ? 'Canteen is closed' : 'Choose pickup time'} <ArrowRight size={16} /></button></div></>}</aside></div>}
 
-    {checkoutOpen && <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && setCheckoutOpen(false)}><div className="checkout-modal"><div className="drawer-heading"><div><span className="eyebrow muted">SECURE CHECKOUT · {selectedShop?.name}</span><h2>Review & pay</h2></div><button className="icon-button" onClick={() => setCheckoutOpen(false)} aria-label="Close checkout"><X /></button></div><form onSubmit={payAndPlaceOrder}><div className="checkout-step-title"><span>1</span><div><strong>Choose pickup time</strong><small>Order now, collect when you arrive</small></div></div><div className="time-options">{[15, 30, 45].map((minutes) => <button type="button" key={minutes} onClick={() => setReadyInMinutes(minutes)} className={readyInMinutes === minutes ? 'time-selected' : ''}><Clock3 size={17} /><b>{minutes} min</b><small>from payment</small></button>)}</div><label className="field-label">Note for the canteen <span>(optional)</span><textarea value={note} maxLength={120} onChange={(e) => setNote(e.target.value)} placeholder="For example: no onions" /></label><div className="checkout-step-title payment-title"><span>2</span><div><strong>Payment method</strong><small>Choose how you would like to pay</small></div></div><div className="payment-methods"><button type="button" aria-pressed={paymentMethod === 'upi'} className={paymentMethod === 'upi' ? 'payment-method selected' : 'payment-method'} onClick={() => setPaymentMethod('upi')}><span className="payment-method-icon upi-icon"><Smartphone size={17}/></span><span><strong>UPI</strong><small>GPay · PhonePe · Paytm</small></span><i/></button><button type="button" aria-pressed={paymentMethod === 'card'} className={paymentMethod === 'card' ? 'payment-method selected' : 'payment-method'} onClick={() => setPaymentMethod('card')}><span className="payment-method-icon"><CreditCard size={17}/></span><span><strong>Credit or debit card</strong><small>Visa · Mastercard · RuPay</small></span><i/></button><button type="button" aria-pressed={paymentMethod === 'netbanking'} className={paymentMethod === 'netbanking' ? 'payment-method selected' : 'payment-method'} onClick={() => setPaymentMethod('netbanking')}><span className="payment-method-icon"><Building2 size={17}/></span><span><strong>Net banking</strong><small>All major banks</small></span><i/></button></div><div className="payment-demo-notice"><Check size={15}/><span><strong>Demo payment</strong> — this checkout previews the flow; it will not charge real money.</span></div><div className="checkout-total"><span>{cartCount} items · Total payable</span><strong>{money(subtotal)}</strong></div><button className="primary-button full pay-button" disabled={busy}>{busy ? 'Processing payment…' : `Pay ${money(subtotal)} securely`} <ArrowRight size={16} /></button><small className="checkout-terms">By continuing, you confirm your order with {selectedShop?.name}.</small></form></div></div>}
+    {checkoutOpen && <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !busy && setCheckoutOpen(false)}><div className="checkout-modal"><div className="drawer-heading"><div><span className="eyebrow muted">SECURE CHECKOUT · {selectedShop?.name}</span><h2>Review & pay</h2></div><button className="icon-button" onClick={() => !busy && setCheckoutOpen(false)} aria-label="Close checkout"><X /></button></div><form onSubmit={payAndPlaceOrder}><div className="checkout-step-title"><span>1</span><div><strong>Choose pickup time</strong><small>Order now, collect when you arrive</small></div></div><div className="time-options">{[15, 30, 45].map((minutes) => <button type="button" key={minutes} onClick={() => setReadyInMinutes(minutes)} className={readyInMinutes === minutes ? 'time-selected' : ''}><Clock3 size={17} /><b>{minutes} min</b><small>from payment</small></button>)}</div><label className="field-label">Note for the canteen <span>(optional)</span><textarea value={note} maxLength={120} onChange={(e) => setNote(e.target.value)} placeholder="For example: no onions" /></label><div className="checkout-step-title payment-title"><span>2</span><div><strong>Pay securely with Razorpay</strong><small>UPI, cards, net banking and other available options</small></div></div><div className="payment-demo-notice"><Check size={15}/><span><strong>Razorpay Checkout</strong> — your available payment options appear securely in the payment window.</span></div><div className="checkout-total"><span>{cartCount} items · Total payable</span><strong>{money(subtotal)}</strong></div><button className="primary-button full pay-button" disabled={busy}>{busy ? 'Opening secure checkout…' : `Pay ${money(subtotal)} securely`} <ArrowRight size={16} /></button><small className="checkout-terms">Your order is sent to {selectedShop?.name} after payment is verified.</small></form></div></div>}
 
     {receipt && <div className="overlay receipt-overlay" onMouseDown={(e) => e.target === e.currentTarget && setReceipt(null)}><div className="receipt-card"><button className="icon-button receipt-close" onClick={() => setReceipt(null)}><X /></button><div className="paid-mark"><Check size={22} /></div><span className="eyebrow muted">PAYMENT COMPLETE · PICKUP TOKEN</span><h2>Your order is in!</h2><div className="token-banner">{receipt.shopLogo && <img className="receipt-shop-logo" src={receipt.shopLogo} alt={`${receipt.shopName} logo`} />}<span>{receipt.shopName}</span><strong>{receipt.token}</strong><small>Order number {receipt.id}</small></div><div className="receipt-lines">{receipt.items.map((item) => <div key={item.productId}><span>{item.quantity} × {item.name}</span><b>{money(item.lineTotal)}</b></div>)}</div><div className="receipt-meta"><div><span>Total paid</span><b>{money(receipt.total)}</b></div><div><span>Payment receipt</span><b>{receipt.payment.receipt}</b></div><div><span>Ready around</span><b>{new Date(receipt.readyAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {receipt.readyInMinutes} min</b></div></div><p className="token-tip">Show this token at the canteen counter when you pick up.</p><button className="primary-button full" onClick={() => { setReceipt(null); setScreen('orders') }}>View my orders <ArrowRight size={15} /></button></div></div>}
     <BbdCorner />
