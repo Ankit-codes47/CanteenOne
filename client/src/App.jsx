@@ -46,8 +46,9 @@ export default function App() {
   }
   const [authMode, setAuthMode] = useState('login')
   const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [phone, setPhone] = useState('')
+  const [otpCode, setOtpCode] = useState('')
+  const [otpSent, setOtpSent] = useState(false)
   const [category, setCategory] = useState('All')
   const [search, setSearch] = useState('')
   const [cart, setCart] = useState([])
@@ -148,18 +149,31 @@ export default function App() {
     setCheckingSession(false)
   }
 
-  async function submitAuth(event) {
+  async function sendPhoneOtp(event) {
     event.preventDefault(); setBusy(true); setError('')
     try {
-      const path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login'
-      const body = authMode === 'register' ? { name, email, password } : { identifier: email, password, role: 'student' }
-      const result = await request(path, { method: 'POST', body: JSON.stringify(body) }, '')
+      const result = await request('/api/auth/otp/send', { method: 'POST', body: JSON.stringify({ phone }) }, '')
+      setPhone(result.phone)
+      setOtpCode('')
+      setOtpSent(true)
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+
+  async function verifyPhoneOtp(event) {
+    event.preventDefault(); setBusy(true); setError('')
+    try {
+      const result = await request('/api/auth/otp/verify', { method: 'POST', body: JSON.stringify({ phone, code: otpCode, mode: authMode, name }) }, '')
       localStorage.setItem('canteenone-token', result.token)
       setToken(result.token); setUser(result.user)
       setScreen(selectedShopId ? 'shop' : 'home')
-      setPassword('')
-    } catch (err) { setError(err.message) } finally { setBusy(false) }
+      setOtpCode('')
+    } catch (err) {
+      if (err.message.startsWith('No account is registered')) { setAuthMode('register'); setOtpSent(false); setOtpCode('') }
+      setError(err.message)
+    } finally { setBusy(false) }
   }
+
+  function resetPhoneAuth(mode = authMode) { setAuthMode(mode); setOtpSent(false); setOtpCode(''); setError('') }
 
   async function signOut() {
     try { await request('/api/auth/logout', { method: 'POST' }, token) } catch {}
@@ -243,7 +257,7 @@ export default function App() {
       <section className="simple-steps"><span>01 <b>Choose your canteen</b></span><i /><span>02 <b>Order from class</b></span><i /><span>03 <b>Pick up with your token</b></span></section>
     </main>}
 
-    {screen === 'auth' && <main className="auth-page"><button className="back-link" onClick={() => setScreen('home')}><ArrowLeft size={16} /> Back to canteens</button><div className="auth-card"><div className="auth-brand">{selectedShop ? <span className={`canteen-logo auth-logo ${selectedShop.theme}`}><img src={selectedShop.logo} alt={`${selectedShop.name} logo`} /></span> : <span className="brand-mark"><UtensilsCrossed size={18} /></span>}<div><span className="eyebrow muted">CANTEENONE ACCOUNT</span><h1>{selectedShop ? `Continue to ${selectedShop.name}` : 'Welcome back'}</h1></div></div><div className="mode-switch"><button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setError('') }}>Log in</button><button className={authMode === 'register' ? 'active' : ''} onClick={() => { setAuthMode('register'); setError('') }}>Create account</button></div><form className="auth-form" onSubmit={submitAuth}>{authMode === 'register' && <label>Your name<input autoComplete="name" required minLength="2" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" /></label>}<label>Email address<input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" /></label><label>Password<input type="password" autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" /></label><button className="primary-button full" disabled={busy}>{busy ? 'Please wait…' : authMode === 'register' ? 'Create my account' : 'Continue'} <ArrowRight size={16} /></button></form><p className="secure-note">{selectedShop ? `After sign in, you will continue to ${selectedShop.name}.` : 'Create a student account to order from any campus canteen.'}</p></div></main>}
+    {screen === 'auth' && <main className="auth-page"><button className="back-link" onClick={() => setScreen('home')}><ArrowLeft size={16} /> Back to canteens</button><div className="auth-card"><div className="auth-brand">{selectedShop ? <span className={`canteen-logo auth-logo ${selectedShop.theme}`}><img src={selectedShop.logo} alt={`${selectedShop.name} logo`} /></span> : <span className="brand-mark"><UtensilsCrossed size={18} /></span>}<div><span className="eyebrow muted">CANTEENONE ACCOUNT</span><h1>{selectedShop ? `Continue to ${selectedShop.name}` : 'Welcome to CanteenOne'}</h1></div></div><div className="mode-switch"><button className={authMode === 'login' ? 'active' : ''} onClick={() => resetPhoneAuth('login')}>Log in</button><button className={authMode === 'register' ? 'active' : ''} onClick={() => resetPhoneAuth('register')}>Create account</button></div><form className="auth-form" onSubmit={otpSent ? verifyPhoneOtp : sendPhoneOtp}>{authMode === 'register' && !otpSent && <label>Your name<input autoComplete="name" required minLength="2" maxLength="80" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" /></label>}{!otpSent ? <><label>Mobile number<input type="tel" autoComplete="tel" inputMode="tel" required value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="10-digit number or +country code" /></label><p className="otp-helper">We’ll send you a 4-digit verification code by SMS.</p><button className="primary-button full" disabled={busy}>{busy ? 'Sending code…' : 'Continue'} <ArrowRight size={16} /></button></> : <><label>4-digit OTP sent to {phone}<input type="text" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{4}" maxLength="4" required value={otpCode} onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="Enter OTP" /></label><button className="primary-button full" disabled={busy || otpCode.length !== 4}>{busy ? 'Verifying…' : 'Verify & continue'} <ArrowRight size={16} /></button><div className="otp-actions"><button type="button" onClick={sendPhoneOtp} disabled={busy}>Resend code</button><button type="button" onClick={() => resetPhoneAuth()}>Change number</button></div></>}</form><p className="secure-note">{selectedShop ? `After verification, you’ll continue to ${selectedShop.name}.` : 'Use your mobile number for quick, secure sign-in and orders.'}</p></div></main>}
 
 
     {screen === 'shop' && selectedShop && <main className="shop-page"><div className="shop-cover"><button className="back-link" onClick={() => setScreen('home')}><ArrowLeft size={15} /> All canteens</button><div className="shop-cover-main"><span className={`canteen-logo big-logo ${selectedShop.theme}`}><img src={selectedShop.logo} alt={`${selectedShop.name} logo`} /></span><div><span className="eyebrow">CAMPUS CANTEEN</span><h1>{selectedShop.name}</h1><p>{selectedShop.description}</p><div className="shop-details"><span>★ {selectedShop.rating}</span><span>·</span><span><Clock3 size={14} /> {selectedShop.eta}</span><span>·</span><span>Preorder pickup</span></div></div></div><div className={`open-status ${selectedShop.isOpen === false ? 'is-closed' : ''}`}><i /> {selectedShop.isOpen === false ? 'CLOSED' : 'OPEN'}</div></div>{selectedShop.isOpen === false && <div className="closed-shop-message" role="status">This canteen is closed right now. You can browse its menu, but ordering is paused.</div>}<section id="menu" className="shop-menu"><div className="menu-toolbar"><div><span className="eyebrow muted">TODAY'S MENU</span><h2>Find your favourite</h2></div><label className="search-box"><Search size={16} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search this menu" /></label></div><div className="menu-filters">{categories.map((item) => <button key={item} className={category === item ? 'filter-active' : ''} onClick={() => setCategory(item)}>{item}</button>)}<span><Clock3 size={14} /> Preorder 15–45 min ahead</span></div><div className="food-grid">{visibleProducts.map((product) => <FoodCard key={product.id} shopId={selectedShopId} product={product} token={token} user={user} shopOpen={selectedShop.isOpen !== false} onAdd={addToCart} onSignIn={() => { setAuthMode('login'); setScreen('auth') }} />)}</div>{visibleProducts.length === 0 && <div className="empty-message">{selectedShop.products.length === 0 ? `The ${selectedShop.name} menu is being added.` : 'No menu items match. Try a different search.'}</div>}</section></main>}
